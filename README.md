@@ -1,4 +1,4 @@
-# Stock Financial Time Series Analysis with GARCH models
+# Stock - Financial Time Series Analysis with GARCH models
 - #### Analysis: TSA.md
 - #### Report: Report Fin-TSA.pdf
 - #### Raw R code: TSA_raw.R
