@@ -1,7 +1,14 @@
+<div align="center">
+  
 # Stock - Financial Time Series Analysis with GARCH models
-- #### Analysis: TSA.md
-- #### Report: Report Fin-TSA.pdf
-- #### Raw R code: TSA_raw.R
-- #### Functions 
----
+ 
+| Purpose | File |
+| --------------- | --------------- |
+| Analysis | TSA-GARCH.md |
+| Report | Report Fin-TSA.pdf |
+| Custom functions | Functions folder |
+| Raw R code | TSA_raw.R |
+
+</div>
+
 ![image](https://github.com/DavidAlexanderMoe/Financial-TSA-GARCH-models/assets/122370567/785f7a46-ae36-476d-ad0c-8838877d671d)
