@@ -3,8 +3,994 @@ title: "TSA GARCH"
 author: "David Alexander Moe"
 date: "2023-06-15"
 output: github_document
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
+
+Read the **REPORT** for a better understanfing of the analysis.
+
+The analysis concerns the listing of Activision Blizzard, Inc. (ATVI), a
+US company that produces and distributes video games. The data, on a
+daily basis, can be found on Yahoo Finance
+(<https://it.finance.yahoo.com/quote/ATVI?p=ATVI&.tsrc=fin-srch>) range
+from 5 January 2015 to 31 December 2021 (1762 observations). The
+available variables are "open", the opening prices, "close", the closing
+prices, "high", the highest price, "low", the lowest price, "volume",
+number of shares traded, and "adjusted", i.e. the "close" prices
+adjusted for dividends. The objective of the analysis is to forecast
+volatility in the next 10 days from 1 January 2022 to 12 January 2022
+(excluding Saturdays and Sundays)
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing necessary dependencies
+
+Importing libraries and functions that will be useful throughout the
+analysis.
+
+```{r}
+rm(list = ls())
+
+################################################################################
+## Loading
+################################################################################
+
+#### Libraries
+library(tseries)  
+library(sandwich)
+library(lmtest)
+library(urca)     ## For unit root
+library(rugarch)  ## For GARCH models
+library(FinTS)    ## For ArchTest (download from RForge)
+library(car)
+library(forecast) 
+library(xts)      ## For time stamps
+library(quantmod) ## For downloading data
+```
+
+Look at the "Functions" folder to see all the specific details about the
+functions.
+
+```{r}
+source("G:\\Il mio Drive\\TRIENNALE\\TS Analysis\\Financial-TSA-GARCH-models\\Functions\\TSA-Predict-Functions.R")
+source("G:\\Il mio Drive\\TRIENNALE\\TS Analysis\\Financial-TSA-GARCH-models\\Functions\\TSA-Finance-Functions.R")
+```
+
+## Read data and declare some external variables
+
+```{r}
+################################################################################
+## Input
+################################################################################
+
+#### Data
+file.data <- "G:\\Il mio Drive\\TRIENNALE\\TS Analysis\\ATVI.csv"
+
+################################################################################
+## Read data
+################################################################################
+
+#### Read
+data <- read.table(file = file.data, header = TRUE, sep = ",", 
+                     check.names = FALSE, comment.char = "", na.strings = ".")
+
+#### Add variables
+colnames(data)[6] <- "Adjusted"
+data <- data.frame(data, 
+                   cc.ret = c(NA, diff(log(data$Adjusted))), 
+                   gkVol = .garmanklass(data = data, sd = TRUE),
+                   check.names = TRUE)
+```
+
+-   cc.ret are the close-to-close returns: log(close price
+    today/yesterday)
+-   gkVol is the garman klass volatility, really useful since it
+    accounts for open, high, low, and closing prices as follows:
+    $\sigma_{GK} = \sqrt{\frac{1}{N-1} \sum_{i=1}^{N} \left(\ln\left(\frac{H_i}{L_i}\right)\right)^2 - \frac{2}{N(N-1)} \sum_{i=1}^{N-1} \ln\left(\frac{C_i}{O_{i+1}}\right) \ln\left(\frac{O_i}{C_{i+1}}\right)}$
+
+```{r}
+#### Extract period
+#ind   <- as.Date(x = "2011-01-03") <= as.Date(x = data$Date) #fino a nyblom ho ottenuto i risultati con queste
+ind   <- as.Date(x = "2015-01-03") <= as.Date(x = data$Date)
+data  <- data[ind, , drop = FALSE]
+
+#### Extract variables
+time  <- as.Date(x = data$Date)
+yc    <- data$Close
+yclog <- log(yc)
+y     <- data$Adjusted
+ylog  <- log(y)
+```
+
+## Preliminary analysis
+
+```{r}
+#### Auxiliary quantities
+nobs <- NROW(y)
+
+#### Plots
+par(mfrow = c(2,2))
+plot(x = time, y = yc,    main = "Close",        xlab = "Tempo", ylab = "Prezzo", type = "l")
+plot(x = time, y = yclog, main = "Ln(close)",    xlab = "Tempo", ylab = "Prezzo", type = "l")
+plot(x = time, y = y,     main = "AdjClose",     xlab = "Tempo", ylab = "Prezzo", type = "l")
+plot(x = time, y = ylog,  main = "Ln(AdjClose)", xlab = "Tempo", ylab = "Prezzo", type = "l")
+```
+
+\
+The patterns do not appear to exhibit significant differences in terms
+of their behavior, as per the Random Walk (RW) style analysis. However,
+there are variations in the values.
+
+To mitigate the impact of dividends, we will analyze the adjusted
+values, which account for the dividend effect.
+
+We will employ a logarithmic scale for the following reasons:
+
+-   allows for a clearer visualization of changes and fluctuations.
+
+-   because it aligns returns with prices on a logarithmic scale, as
+    they represent the first differences of logarithmic prices
+    (deltalogprezzi).
+
+From this point onward, our analysis will focus on log(Adjusted) values.
+
+The Figures are showing atrend of "adjusted" prices, the one on the
+right is in a logarithmic scale often preferred because it better
+captures the variations. A growing trend emerges interrupted by negative
+phases in 2019 and 2021.
+
+The data appear to be non-stationary, a fact confirmed by the linear
+decay of the ACF and by $\phi_{1}$ close to 1 in the PACF, as visible
+here.
+
+```{r}
+#### Serial correlation
+par(mfrow = c(2,1))
+Acf(x = ylog, lag.max = 150, type = "correlation", main = "Price")
+Acf(x = ylog, lag.max = 150, type = "partial", main = "Price")
+```
+
+```{r}
+######### ADF tests using the Di Fonzo-Lisi procedure
+cat("\n-----------------------------------------------------------------
+  Unit root analysis following the Di Fonzo-Lisi procedure\n")
+#### (DGP:   RW + drift (+ other possible stationary terms); 
+##    Model: AR(1) + Trend (+ other possible stationary terms))
+adf.1 <- ur.df(y = ylog, type = "trend", lags = 20, selectlags = "AIC")
+cat("\n-----\nTest1: ADF with trend\n")
+print( summary(adf.1) )
+#### Comment: Accept for tau3, Accept for Phi3 -> look at Phi2.
+##   Accept for Phi2. According to the procedure, we have now to assume
+##   (DGP:   RW; 
+##    Model: AR(1) + constant (+ other possible stationary terms))
+
+#### (DGP:   RW; 
+##    Model: AR(1) + constant (+ other possible stationary terms))
+adf.2 <- ur.df(y = ylog, type = "drift", lags = 20, selectlags = "AIC")
+cat("\n-----\nTest1: ADF with drift\n")
+print( summary(adf.2) )
+#### Comment: Accept for tau2, Accept for Phi1 -> Unit root.
+#### IMPORTANT: This conclusion is typical in time series of daily prices of 
+#financial assets. Quindi ho UR, non è staz e l ur non dip dalla parte stag perche di stagionalita non ne ho 
+
+#prezzi non stazionari -> altro motivo per cui uso log rendimenti
+```
+
+The ADF test confirms the presence of a Unit Root.
+
+```{r}
+################################################################################
+## Preliminary analyses of log-returns
+################################################################################
+
+#### Percentage log-returns
+yret <- xts(x = 100 * data$cc.ret, order.by = time)
+#ci associo il tempo con xts()
+#puo capitare che sia scomodo in alcuni casi
+# yret <- 100 * data$cc.ret
+
+######## Preliminary analysis
+cat("\n-----------------------------------------------------------------
+  Preliminary analysis of log-returns\n")
+#### Time series
+par(mfrow = c(1,1))
+plot(x = time, y = yret, main = "Returns", 
+     xlab = "", ylab = "", type = "l")
+# ts dei rendimenti
+# dal plot si vede che ci sono dei picchi -> quelle oss si concentreranno nelle code della distr
+# non condizionata dei rendimenti, quelle in cui c ? poca variabilita invece al centro
+
+
+####  Comments: 
+##   1) Daily returns move around a mean close to zero similarly to a WN
+##      con tanta ETEROSCHEDASTICITA e MEDIA VICINO A ZERO
+##      mean(yret) -> media giornaliera
+##      questo perche le differenze prime di un RW (log prezzi simili a RW) 
+##      sono un WN; 
+##   2) There are periods with different variability around the mean (sometimes 
+##      high, sometimes low) -> volatility clustering
+##   3) Non sembre aver risentito della crisi del covid (argomentare)
+```
+
+```{r}
+#### Serial correlation
+par(mfrow = c(2,1))
+Acf(x = yret, lag.max = 150, type = "correlation", main = "Returns")
+Acf(x = yret, lag.max = 150, type = "partial", main = "Returns")
+
+#atvi fa un po eccezione -> per il primo lag picco negativo ai primi lag 
+#(che sono comunque molto bassi = -0.05 basso in termini assoluti)
+#si ritrova la SOMIGLIANZA e non uguaglianza ad un WN, motivo anche delle somiglianza di acf e pacf
+```
+
+Figures show yield plots with the corresponding ACF and PACF.The
+log-returns values seem to behave like a WN (in fact ACF and PACF are
+similar) with mean 0 with the difference that the volatility varies over
+time.
+
+```{r}
+cat("\nLjung-Box statistics on log-returns\n")
+npar <- 0
+lag <- c(2, 5, 10, 15, 20, 30, 50) + npar
+lb <- mapply(FUN = Box.test, lag = lag, 
+             MoreArgs = list(x = yret, type = "Ljung-Box", fitdf = npar))[1:3,]
+print(rbind(lag = lag, lb))
+#### Comment: All significant but it is quite uncommon (rifuito H0 per tutte)
+```
+
+```{r}
+#### A further check should be "do an ADF test on returns to check whether they 
+##   have additional UR's", the result is easily predictable -> no ur
+#levo la prima oss perch? NA
+
+######### ADF tests using the Di Fonzo-Lisi procedure on Log(returns)
+cat("\n-----------------------------------------------------------------
+  Unit root analysis following the Di Fonzo-Lisi procedure\n")
+#### (DGP:   RW + drift (+ other possible stationary terms); 
+##    Model: AR(1) + Trend (+ other possible stationary terms))
+adf.1 <- ur.df(y = yret, type = "trend", lags = 20, selectlags = "AIC") #yret[-1] quando uso tutte le oss
+cat("\n-----\nTest1: ADF with trend\n")
+print( summary(adf.1) )
+#### Comment: Accept for tau3, Accept for Phi3 -> look at Phi2.
+##   Accept for Phi2. According to the procedure, we have now to assume
+##   (DGP:   RW; 
+##    Model: AR(1) + constant (+ other possible stationary terms))
+
+#come previsto, rifiuto le statistiche test e non ho radici unitarie
+```
+
+## Tests on returns
+
+```{r}
+
+#### Independence test on returns (test IID)
+x1 <- yret #yret[-1] quando uso tutte le oss
+bds <- bds.test(x = x1, m = 4, 
+                eps = seq(from = 0.5 * sd(x1), to = 2 * sd(x1), length = 4),
+                trace = FALSE)
+cat("BDS test on returns\n")
+print(bds)
+#### rendimenti non IID (integrare)
+#mostra stat test n(0,1) e p-value
+#differenze prime dei log prezzi ma con eteroschedasticita
+#per vedere indip e ID 
+
+
+#### Another diagnostic: the ARCH test
+cat("\n-----------------------------------------------------------------
+  ARCH based preliminary analyses\n")
+cat("ARCH test on demeaned log-returns\n")
+lag <- c(4, 8, 12, 16)
+at <- mapply(FUN = ArchTest, lags = lag, 
+             MoreArgs = list(x = yret, demean = TRUE))
+print(at[1:3,])
+#### largamente significativi a tutti i lag
+# il fatto che non ci sia IID ? confermato dal fatto che rifiuto in tutti i casi
+# -> rendimenti eteroschedastici
+
+
+
+#### ACF of residuals, abs residuals and squared residuals
+par(mfrow = c(3,1))
+Acf(x = yret, lag.max = 100, type = "correlation", main = "Returns")
+Acf(x = abs(yret), lag.max = 100, type = "correlation", main = "|Returns|")
+Acf(x = yret^2, lag.max = 100, type = "correlation", main = expression(Returns^2))
+
+#rendimenti di tutti i tipi
+#decadimento lentissimo
+#questo certifica il volatility clustering in termini di autocorr -> eterosch
+#nei ^2 e abs si vede che c'? volatilit? -> si vede meglio nei abs
+
+
+#### Unconditional distribution
+par(mfrow = c(1,2))
+.hist(x = yret, xlim = c(-10, 10), n = 200, breaks = 200, main = "Returns") #yret[-1] quando uso tutte le oss
+qqnorm(y = scale(yret)) #yret[-1] quando uso tutte le oss
+abline(a = 0, b = 1, col = "red")
+cat("\nJarque-Bera statistics on log-returns")
+print( jarque.bera.test(x = yret) ) #yret[-1] quando uso tutte le oss
+#### Comment: Normality is highly rejected; the distribution is leptokurtic.
+# distrib non condiz dei rendimenti
+# forte ipernormalit? (code grandi) -> altra certificazione del volatility
+# clustering da un altro punto di vista
+# piu simile a student t che normale
+```
+
+## ARMA modeling
+
+The best ARMA on returns is ARMA(1,0) (table 12) with standardized
+student t distribution of errors.
+
+```{r}
+####
+cat("\n-----------------------------------------------------------------
+  ARMA on log-returns\n")
+#### Now we use package rugarch
+##   Try an ARMA and look at the results; try to change distribution
+## ARMA(1,0) norm    mu accetto Ho
+## ARMA(1,0) std     Akaike       4.134797   Bayes        4.147225   mu rifiuto Ho, tutti i parametri signif e IC pi? bassi
+## ARMA(0,1) std     praticamente uguale a (1,0)
+
+#uso ARMA(1,0) std , gli se robusti si alzano tranne per mu che addirittura si abbassa ma di poco
+#no skew -> no asimmetria
+#? molto diversa dalla normale -> ho shape
+#nonostanza std c'? ancora un po di diff tra gli se e gli se robusti
+
+
+#guardare un po anche i residui ma non importa essere precisi perche c'? tanta eteroshc
+# costruisco il modello
+spec0 <- arfimaspec(
+  mean.model = list(armaOrder = c(1,0), 
+                    include.mean = TRUE, external.regressors = NULL), 
+  distribution.model = "std" ) 
+# c ? tanta leptocurtosi quindi metto std
+# mean model modello sulla media p,q
+# distr model modello degli errori -> norm o std (student t standardizzata)
+# che uso per confrontarla con la normale perche senno avrei media 0 e var df/df-2
+# <- la metto in base alla distriub non condiz dei rendimenti
+# include mean si mette sempre a TRUE
+# ? un arima col d=0 sempre
+
+# stimo il modello
+#yret[-1] quando uso tutte le oss
+fit0 <- arfimafit(spec = spec0, data = yret, 
+                  solver = "solnp")
+
+## Store the number of parameters
+np0 <- NROW(fit0@fit$coef)
+
+## Some statistics
+cat( "\nInformation Criteria" )
+print( infocriteria(fit0) )
+#aic e bic che sono valori medi aic/#oss (su arima non sono medi)
+
+cat("\nMatrice coefficienti\n")
+print( fit0@fit$matcoef )
+#stima coefficienti ovvero il modello stimato
+#mu media non condizionata -> R H0 -> stat significativa
+
+cat("\nRobust matcoef\n")
+print( fit0@fit$robust.matcoef )
+#stima S.E. robusti, robusti rispetto ad una possibile cattiva spec della distrib degli errori
+#estimate identica, cambia l S.E. che aumenta un po di solito
+
+#abbiamo dati fortemente eterosch -> coglierla e modellarla bene
+#### Result: yret looks like a WN, implying that y is a RW. Really?
+
+#### ACF of residuals, abs residuals and squared residuals
+res <- as.numeric( residuals(fit0) )
+par(mfrow = c(3,1))
+Acf(x = res, lag.max = 100, type = "correlation", main = "Returns")
+Acf(x = abs(res), lag.max = 100, type = "correlation", main = "|res|")
+Acf(x = res^2, lag.max = 100, type = "correlation", main = expression(res^2))
+
+#### Comments: 
+##   1) Large serial correlation of absolute and squared residuals; 
+##   2) absolute values are more correlated than squares.
+##   eteroschedasticit? ? rimasta anche dopo il tentativo di modificare i dati
+#   l'obiettivo ? quello di modellare la volatilit?: nei mercati fin pi? ? alta e + c? rischi
+#   per prevedere il rischio, da un punto di vista stat -> + volatilit? indica bande piu larghe
+#   io meno ne ho meglio ?
+##   Conclusion: residuals are not WN. Since residuals are similar to the 
+##   original time series, the original too is not a WN.
+```
+
+## ARCH and GARCH modeling
+
+In order to model volatility, various GARCH-type models are adopted
+starting from simple-GARCH (sGARCH), the simplest.
+
+```{r}
+####
+cat("\n-----------------------------------------------------------------
+  GARCH on log-returns\n")
+
+#### Simple GARCH
+spec1 <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1,1), 
+                        submodel = NULL, external.regressors = NULL, variance.targeting = FALSE), 
+  mean.model = list(armaOrder = c(1,0), include.mean = TRUE,  
+                    external.regressors = NULL), 
+  distribution.model = "std")
+fit1 <- ugarchfit(spec = spec1, data = yret, solver = "solnp") #yret[-1] quando uso tutte le oss
+## Store the number of parameters
+np1 <- NROW(fit1@fit$coef)
+## Some statistics
+cat( "\nInformation Criteria" )
+print( infocriteria(fit1) )
+cat("\nMatcoef\n")
+print( fit1@fit$matcoef )
+cat("\nRobust matcoef\n")
+print( fit1@fit$robust.matcoef )
+
+#### Diagnostics: Use standardized residuals!
+fit <- fit1
+par(mfrow = c(3,1))
+Acf(x = fit@fit$z,      lag.max = 100, type = "correlation", main = "z")
+Acf(x = abs(fit@fit$z), lag.max = 100, type = "correlation", main = "|z|")
+Acf(x = fit@fit$z^2,    lag.max = 100, type = "correlation", main = expression(z^2))
+lag1 <- np1 + c(1, 2, 5, 10, 15, 20)
+cat("\nLjung-Box on standardized residuals:\n")
+lb1 <- mapply(FUN = Box.test, lag = lag1, 
+              MoreArgs = list(x = fit@fit$z, type = "Ljung-Box", fitdf = np1) )
+print(rbind(lag = lag1, lb1[1:3,]))
+cat("\nLjung-Box on |standardized residuals|\n")
+lb1 <- mapply(FUN = Box.test, lag = lag1, 
+              MoreArgs = list(x = abs(fit@fit$z), type = "Ljung-Box", fitdf = np1) )
+print(rbind(lag = lag1, lb1[1:3,]))
+cat("\nLjung-Box on standardized residuals^2:\n")
+lb1 <- mapply(FUN = Box.test, lag = lag1, 
+              MoreArgs = list(x = fit@fit$z^2, type = "Ljung-Box", fitdf = np1) )
+print(rbind(lag = lag1, lb1[1:3,]))
+
+#### ARCH test
+cat("\nARCH test on standardized residuals\n")
+lag <- c(4, 8, 12, 16)
+at <- mapply(FUN = ArchTest, lags = lag, 
+             MoreArgs = list(x = fit1@fit$z, demean = TRUE))
+print(at[1:3,])
+#### Comment: Varianza molto stabile
+
+par(mfrow = c(1,2))
+xlim <- c(-5, 5)
+.hist.fit(fit = fit1, xlim = xlim, ylim = c(0,0.55), n = 200, breaks = 100, 
+          plot.norm = TRUE, main = "")
+.qqplot.fit(fit = fit1)
+
+#### Leverage check
+cat("\nSign bias test\n")
+print( signbias(fit1) )
+# accetto tutto e non ho nessuna asimmetria
+# ? affidabile? cambiamo il modello garch mettendogli asimmetria
+```
+
+CIs are better than ARMA(1,0) and all coefficients are highly
+significant. Before moving on to the GJR-GARCH specification, a model
+analogous to the sGARCH with the addition of a term that presents a
+possible asymmetric behavior of the conditional variance, it is
+necessary to test that the data actually present this asymmetric
+component with the tests of signs which seems to exclude an asymmetry
+effect.
+
+The estimated GJR-GARCH(1,1) (Table 15) contradicts this result: it has
+slightly lower CIs than the sGARCH(1,1) model.
+
+```{r}
+#### GJR GARCH
+#### This can be verified in an explicit modeling -> gjrGARCH in place of sGARCH
+spec2 <- ugarchspec(
+  variance.model = list(model = "gjrGARCH", garchOrder = c(1, 1), 
+                        submodel = NULL, external.regressors = NULL, variance.targeting = FALSE), 
+  mean.model = list(armaOrder = c(1, 0), include.mean = TRUE, 
+                    external.regressors = NULL), distribution.model = "std")
+fit2 <- ugarchfit(spec = spec2, data = yret, solver = "solnp") #yret[-1] quando uso tutte le oss
+## Store the number of parameters
+np2 <- NROW(fit2@fit$coef)
+## Some statistics
+cat( "\nInformation Criteria" )
+print( infocriteria(fit2) )
+#sono migliorati?
+
+cat("\nMatcoef\n")
+print( fit2@fit$matcoef )
+cat("\nRobust matcoef\n")
+print( fit2@fit$robust.matcoef )
+#alpha1 non significativo -> coeff associato al termine Ut-1
+#come previsto il coeff gamma1 è positivo (si vede dal grafico) 
+#ed ? signif in entrambe le versioni
+```
+
+The coefficient associated with the "leverage" effect (gamma1) is highly
+significant (see also the NIC (News Impact Curve)).
+Obtained as a special case of the Family-GARCH, the T-GARCH model is
+estimated:
+
+```{r}
+################################################################################
+## Alternative GARCH formulations via fGARCH: GJRGARCH and T-GARCH
+################################################################################
+
+# tgarch si usa nella magg parte dei casi
+
+#### GJR using fGARCH
+spec4 <- ugarchspec(
+  variance.model = list(model = "fGARCH", garchOrder = c(1, 1), 
+                        submodel = "GJRGARCH", external.regressors = NULL, variance.targeting = FALSE),  
+  mean.model = list(armaOrder = c(1,0), include.mean = TRUE,  
+                    external.regressors = NULL), 
+  distribution.model = "std")
+fit4 <- ugarchfit(spec = spec4, data = yret, solver = "solnp")
+## Store the number of parameters
+np4 <- NROW(fit4@fit$coef)
+
+#### Conversion to the "traditional" GJR form
+fit4c <- .fgarch.2.gjr(fit = fit4)
+
+#### Comparison
+cat("\n\ngjrGARCH vs fGARCH(GJRGARCH)\n")
+cat("Direct GJR\n")
+print( infocriteria(fit2) )
+print(fit2@fit$robust.matcoef)
+
+cat("GJR via fGARCH\n")
+print( infocriteria(fit4) )
+print(fit4c$robust.matcoef)
+#confrontare questi output tra i 2 modelli
+
+
+
+#### TGARCH (using fGARCH) 
+spec5 <- ugarchspec(
+  variance.model = list(model = "fGARCH", garchOrder = c(1, 1), 
+                        submodel = "TGARCH", external.regressors = NULL, variance.targeting = FALSE),  
+  mean.model = list(armaOrder = c(1, 0), include.mean = TRUE, 
+                    external.regressors = NULL), 
+  distribution.model = "std")
+fit5 <- ugarchfit(spec = spec5, data = yret, solver = "solnp")
+
+## Store the number of parameters
+np5 <- NROW(fit5@fit$coef)
+
+#### Conversion to the "traditional" GJR form
+fit5c <- .fgarch.2.gjr(fit = fit5)
+
+#### Coefficient comparison
+cat("\n\nGJR-GARCH vs T-GARCH\n")
+cat("GJR-GARCH\n")
+print( infocriteria(fit4) )
+print(fit4c$robust.matcoef)
+cat("T-GARCH\n")
+print( infocriteria(fit5) )
+print(fit5c$robust.matcoef)
+
+#IC piu bassi nel tgarch ma p-value leggermente alzati
+
+#### Compare the News Impact Curves (sGARCH vs gjrGARCH vs TGARCH) 
+ni1 <- newsimpact(z = NULL, fit1)
+ni2 <- newsimpact(z = NULL, fit2)
+ni5 <- newsimpact(z = NULL, fit5)
+legend <- c("Simple-GARCH", "GJR-GARCH", "T-GARCH")
+col  <- c("black", "red", "blue")
+ylim <- range( ni1$zy, ni2$zy, ni5$zy)
+par(mfrow = c(1,1), mar = c(4, 4.5, 3, 1) + 0.1)
+plot(x = ni1$zx, y = ni1$zy, ylab = ni1$yexpr, xlab = ni1$xexpr, type = "l", 
+     ylim = ylim, main = "News Impact Curve", col = col[1])
+lines(x = ni2$zx, y = ni2$zy, col = col[2])
+lines(x = ni5$zx, y = ni5$zy, col = col[3])
+legend(x = "topright", y = NULL, legend = legend, border = FALSE, col = col, 
+       lty = 1, text.col = col)
+
+
+#### Stability check
+cat("\nStability check (Nyblom test)\n")
+print( nyblom(fit5) )
+#statistiche singole e statistiche congiunte e guardo rispetto ai valori critici
+#di tutti questi parametri l unico stabile ? mu (mu < tutti i cval individuali)
+# se stattest > cval -> parametro non stabile
+## Comment: stability is rejected -> reduce the length of the series to 2015
+#diminuendo le oss i parametri sono stabili -> sigma^2 j = 0
+
+
+#### Use standardized residuals!
+#uso il t garch perch? le differenze sono veramente minime
+fit <- fit5
+par(mfrow = c(3,1))
+Acf(x = fit@fit$z, lag.max = 100, type = "correlation", main = "Residui standardizzati")
+Acf(x = abs(fit@fit$z), lag.max = 100, type = "correlation", main = "Residui standardizzati in valore assoluto")
+Acf(x = fit@fit$z^2, lag.max = 100, type = "correlation", main = "Residui standardizzati al quadrato")
+cat("\nLjung-Box statistics on z residuals\n")
+lag1 <- np5 + c(1, 2, 5, 10, 15, 20)
+cat("\nLjung-Box on standardized residuals:\n")
+lb1 <- mapply(FUN = Box.test, lag = lag1, 
+              MoreArgs = list(x = fit@fit$z, type = "Ljung-Box", fitdf = np5) )
+print(rbind(lag = lag1, lb1[1:3,]))
+cat("\nLjung-Box statistics on |z residuals|\n")
+lb1 <- mapply(FUN = Box.test, lag = lag1, 
+              MoreArgs = list(x = abs(fit@fit$z), type = "Ljung-Box", fitdf = np5) )
+print(rbind(lag = lag1, lb1[1:3,]))
+cat("\nLjung-Box statistics on (z residuals)^2\n")
+lb1 <- mapply(FUN = Box.test, lag = lag1, 
+              MoreArgs = list(x = fit@fit$z^2, type = "Ljung-Box", fitdf = np5) )
+print(rbind(lag = lag1, lb1[1:3,]))
+
+#### ARCH test
+cat("\nARCH test on standardized residuals\n")
+lag <- c(4, 8, 12, 16)
+at <- mapply(FUN = ArchTest, lags = lag, 
+             MoreArgs = list(x = fit@fit$z, demean = TRUE))
+print(at[1:3,])
+#### Comment: Varianza molto stabile
+
+
+#### Stability check
+cat("\nStability check (Nyblom test)\n")
+print( nyblom(fit5) )
+#statistiche singole e statistiche congiunte e guardo rispetto ai valori critici
+#di tutti questi parametri l unico stabile ? mu (mu < tutti i cval individuali)
+# se stattest > cval -> parametro non stabile
+## Comment: stability is rejected -> reduce the length of the series to 2015
+#diminuendo le oss i parametri sono stabili -> sigma^2 j = 0
+
+
+#### Independence test on ln(|standardized residuals|)
+x1 <- log( abs(fit@fit$z) )
+bds <- bds.test(x = x1, m = 4, 
+                eps = seq(from = 0.5 * sd(x1), to = 2 * sd(x1), length = 4),
+                trace = FALSE)
+cat("BDS test on log(abs(z residuals))\n")
+print(bds)
+#### Comment: returns are i.i.d.
+# tutti i p-value > 0.05
+
+
+
+```
+
+Usually this model is the one that best fits the data: in this case we
+observe even lower CIs than the GJR-GARCH. Graph shows the NIC of the
+estimated GARCH models: the curves show the impact of Ut-1 news versus
+the conditional variance. In sGARCH the conditional variance does not
+react asymmetrically with respect to Ut-1, the opposite of what happens
+in the other two models.
+
+## NIC and Variance targeting
+
+```{r}
+#### Compare the News Impact Curves (sGARCH vs gjrGARCH) 
+ni1 <- newsimpact(z = NULL, fit1)
+ni2 <- newsimpact(z = NULL, fit2)
+legend <- c("Simple-GARCH", "GJR-GARCH")
+col  <- c("black", "red")
+ylim <- range( ni1$zy, ni2$zy )
+par(mfrow = c(1,1), mar = c(4, 4.5, 3, 1) + 0.1, lwd = 2)
+plot(x = ni1$zx, y = ni1$zy, ylab = ni1$yexpr, xlab = ni1$xexpr, type = "l", 
+     ylim = ylim, main = "News Impact Curve", col = col[1])
+lines(x = ni2$zx, y = ni2$zy, col = col[2], lwd = 2)
+legend(x = "topright", y = NULL, legend = legend, border = FALSE, col = col, 
+       lty = 1, text.col = col)
+
+
+################################################################################
+## Stationarity and Variance Targeting
+################################################################################
+
+#### Include variance targeting in GJR
+spec3 <- ugarchspec(variance.model = list(model = "gjrGARCH", garchOrder = c(1, 1), 
+                                          submodel = NULL, external.regressors = NULL, variance.targeting = TRUE),  
+                    mean.model = list(armaOrder = c(1, 0), include.mean = TRUE, 
+                                      external.regressors = NULL), distribution.model = "std")
+fit3 <- ugarchfit(spec = spec3, data = yret, solver = "solnp")
+## Store the number of parameters
+np3 <- NROW(fit3@fit$coef)
+
+#### Compare the two fits
+cat("\nGJR without VT\n")
+print( infocriteria(fit2) )
+print(fit2@fit$robust.matcoef)
+cat("\nGJR with VT\n")
+print( infocriteria(fit3) )
+print(fit3@fit$robust.matcoef)
+```
+
+-   The y-axis represents conditional variations.
+
+-   The x-axis corresponds to Ut-1.
+
+-   The curve depicting the impact of news (Ut-1) is influenced by
+    yesterday's market performance. If it performed well, the line is
+    \>0; otherwise, it is \<0.
+
+-   In the case of the simple GARCH (black curve), there is no
+    asymmetry, and it forms a parabolic shape.
+
+-   On the other hand, for the GJR-GARCH (red curve), there is
+    asymmetry. It reacts much more swiftly to negative news compared to
+    positive news, where its response is essentially constant.
+
+-   When Ut-1 = 0, the curves have a value close to 5, illustrating the
+    reaction of conditional variance to Ut-1.
+
+-   It can be concluded that some Ut-1 news has an excessive influence
+    on returns.
+
+-   Activision, in particular, reacts sharply to this news and likely
+    also to other market-related events, as demonstrated in the NIC
+    (News Impact Curve). Alpha is a measure of market sensitivity to
+    news, and Alpha is zero relative to Beta. Therefore, the reaction of
+    conditional volatility to news is relatively contained.
+
+Let's move on to the IGARCH:
+
+```{r}
+################################################################################
+## Alternative GARCH specifications: iGARCH
+################################################################################
+#in cui non c ? la componente di asimmetria
+#staz in senso forte ma non in senso debole quindi non si pu? usare variance targeting
+
+#### IGARCH 
+spec6 <- ugarchspec(variance.model = list(model = "iGARCH", garchOrder = c(1, 1), 
+                                          submodel = NULL, external.regressors = NULL, variance.targeting = FALSE),  
+                    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE, 
+                                      external.regressors = NULL), distribution.model = "std")
+fit6 <- ugarchfit(spec = spec6, data = yret, solver = "solnp")
+## Store the number of parameters
+np6 <- NROW(fit6@fit$coef)
+## Some statistics
+cat( "\nInformation Criteria" )
+print( infocriteria(fit6) )
+cat("\nMatcoef\n")
+print( fit6@fit$matcoef )
+cat("\nRobust matcoef\n")
+print( fit6@fit$robust.matcoef )
+## Check alpha1 + beta1 = 1
+
+```
+
+## **Forecasting Evaluation**
+
+**Overview:**
+
+1.  We assess the forecasting accuracy of the GARCH model by comparing
+    its volatility estimates with an external benchmark, the
+    Garman-Klass volatility. This benchmark provides a less noisy
+    measure of volatility compared to squared returns. It's important to
+    note that GARCH models primarily focus on modeling squared or
+    absolute returns.
+
+2.  The following section presents In-Sample (IS) forecasts, where the
+    forecasting period is within the estimation period. It's worth
+    noting that for a more robust evaluation, Out-of-Sample (OOS)
+    forecasts should be considered and compared.
+
+-   Comparing Garman-Klass (GK) to absolute returns:
+
+    -   GK exhibits behavior similar to absolute returns but with
+        slightly more precision.
+
+    -   Absolute returns, on the other hand, tend to be a bit noisier.
+
+    -   GK will serve as the benchmark and reference point.
+
+-   The formula y = sqrt(2/pi) \* abs(yret) represents the sample
+    standard deviation. It is a biased estimator of the true standard
+    deviation. Therefore, when dealing with normally distributed
+    returns, it is used to correct for this bias and obtain an unbiased
+    estimate.
+
+```{r}
+#### EX-POST
+#ex post h fissato e j si muove
+
+#### External benchmark
+y  <- data$gkVol * 100
+
+#### To give an idea
+par(mfrow=c(2,1), lwd=1)
+plot(x=time, y=y, type="l", main="Garman-Klass volatility measure", ylab="")
+plot(x=time, y=sqrt(2/pi)*abs(yret) ,type="l" ,main="absolute returns" ,ylab="")
+```
+
+```{r}
+#### To give an idea
+par(mfrow = c(1,1), lwd = 1)
+plot(x = time, y = y, type = "l", ylab = "Garman-Klass volatility measure")
+lines(x = time, y = fit5@fit$sigma, col = "red")
+lines(x = time, y = fit6@fit$sigma, col = "blue")
+legend("topright", inset=0, title="Volatility measure:", 
+       legend=c("Garman-Klass","T-GARCH", "I-GARCH"), 
+       col=c("black","red","blue"), lty=1, cex=0.70)
+#met? 2020 e 2017 non seguono bene, in generale senno sembrerebbero seguire bene la proxy
+
+#### Set naive -> 2 naive differenti
+naive.vol <- sd(yret) #dev std dei rendimenti (volatilit?)
+naive.var <- naive.vol^2 #var campionaria, posso usarla perche ho stazionarieta col naive
+
+```
+
+In general, the two models seem to follow the proxy in figure [17] quite
+well, there is some slight more marked difference only towards mid-2017
+and at the peak of 2020. To evaluate which model is the best among the
+four, in the table the comparison of the error measures for both
+volatility and variance:
+
+```{r}
+#### Error measures
+cat("---------------------------------------------------------------------", 
+    "\nError measures\n")
+ErrorMeas <- data.frame(
+  measure = c("Volatility", "Volatility", "Volatility", "Volatility", 
+              "Variance", "Variance", "Variance", "Variance"), 
+  model = c("GARCH", "GJR-GARCH", "T-GARCH", "IGARCH", 
+            "GARCH", "GJR-GARCH", "T-GARCH", "IGARCH"), 
+  rbind( 
+    .ErrorMeasures(y = y,   fit = fit1@fit$sigma,   naive = naive.vol), 
+    .ErrorMeasures(y = y,   fit = fit2@fit$sigma,   naive = naive.vol), 
+    .ErrorMeasures(y = y,   fit = fit5@fit$sigma,   naive = naive.vol), 
+    .ErrorMeasures(y = y,   fit = fit6@fit$sigma,   naive = naive.vol), 
+    .ErrorMeasures(y = y^2, fit = fit1@fit$sigma^2, naive = naive.var), 
+    .ErrorMeasures(y = y^2, fit = fit2@fit$sigma^2, naive = naive.var), 
+    .ErrorMeasures(y = y^2, fit = fit5@fit$sigma^2, naive = naive.var), 
+    .ErrorMeasures(y = y^2, fit = fit6@fit$sigma^2, naive = naive.var) ) ) 
+print( ErrorMeas )
+```
+
+With respect to volatility, the T-GARCH seems to be the best (it is a
+model built specifically on volatility), while with respect to variance
+things are not very clear. It is noted that many ME and all MPE are
+negative therefore forecasts will probably tend to be higher than the
+true values. Having so many observations available, it is possible to
+make other checks such as the Diebold-Mariano test which compares two
+models at a time, evaluating which is the best among them.
+Volatility:
+
+```{r}
+#### Diebold-Mariano forecasting comparison -> competizione fra 2 modelli
+cat("---------------------------------------------------------------------", 
+    "\nDiebold-Mariano comparison\n\n")
+## Volatility
+cat("Volatility\n")
+h <- 1
+e1 <- y - fit1@fit$sigma
+e2 <- y - fit2@fit$sigma
+e5 <- y - fit5@fit$sigma
+e6 <- y - fit6@fit$sigma
+.DieboldMariano(e1 = e1, e2 = e2, h = h, power = 1, msg = "GARCH vs GJR-GARCH ->")
+.DieboldMariano(e1 = e1, e2 = e2, h = h, power = 2, msg = "GARCH vs GJR-GARCH ->")
+.DieboldMariano(e1 = e2, e2 = e5, h = h, power = 1, msg = "GJR-GARCH vs T-GARCH   ->")
+.DieboldMariano(e1 = e1, e2 = e5, h = h, power = 2, msg = "GARCH vs T-GARCH   ->")
+.DieboldMariano(e1 = e1, e2 = e6, h = h, power = 1, msg = "GARCH vs IGARCH    ->")
+.DieboldMariano(e1 = e1, e2 = e6, h = h, power = 2, msg = "GARCH vs IGARCH    ->")
+```
+
+```{r}
+## Conditional variance
+cat("Conditional variance\n")
+h <- 1
+e1 <- y^2 - fit1@fit$sigma^2
+e2 <- y^2 - fit2@fit$sigma^2
+e5 <- y^2 - fit5@fit$sigma^2
+e6 <- y^2 - fit6@fit$sigma^2
+.DieboldMariano(e1 = e1, e2 = e2, h = h, power = 1, msg = "GARCH vs GJR-GARCH ->")
+#Stat (L1-L2): -0.7920021 -> GARCH
+.DieboldMariano(e1 = e1, e2 = e2, h = h, power = 2, msg = "GARCH vs GJR-GARCH ->")
+#Stat (L1-L2): -1.354877 -> GARCH
+.DieboldMariano(e1 = e2, e2 = e5, h = h, power = 1, msg = "GJR-GARCH vs T-GARCH   ->")
+.DieboldMariano(e1 = e1, e2 = e5, h = h, power = 2, msg = "GARCH vs T-GARCH   ->")
+#Stat (L1-L2): 1.984773 -> T-GARCH
+.DieboldMariano(e1 = e1, e2 = e6, h = h, power = 1, msg = "GARCH vs IGARCH    ->")
+#Stat (L1-L2): -10.57689 -> GARCH
+.DieboldMariano(e1 = e1, e2 = e6, h = h, power = 2, msg = "GARCH vs IGARCH    ->")
+#Stat (L1-L2): -0.8997602 -> GARCH
+```
+
+The Mincer-Zarnowitz test in table (22) checks whether an estimated
+model produces unbiased predictions. For the GARCH, GJR-GARCH and
+T-GARCH models the predictions do not appear biased, while for the
+IGARCH the F statistic in the Joint test is rejected.
+
+```{r}
+cat("---------------------------------------------------------------------", 
+    "\nMincer-Zarnowitz\n" )
+x1 <- .MincerZarnowitz(y = y, fit = fit1@fit$sigma, msg = "GARCH\n") #va bene
+x1 <- .MincerZarnowitz(y = y, fit = fit3@fit$sigma, msg = "GJR-GARCH\n") #va bene
+x1 <- .MincerZarnowitz(y = y, fit = fit5@fit$sigma, msg = "T-GARCH\n") #va bene
+x1 <- .MincerZarnowitz(y = y, fit = fit6@fit$sigma, msg = "IGARCH\n") #non va bene F ma ? normale
+```
+
+## Forecast using rugarch
+
+The forecast of returns and volatility for the 10 days following 31
+December 2021 in which the financial
+markets are open. In table the forecast values:
+
+plot(forc1)
+
+```{r}
+#EX-ANTE
+#H mobile T fixed
+
+#### Settings
+H <- 10
+
+#### 1) ex-ante, h = 1:H
+forc1 <- ugarchforecast(fitORspec = fit5, n.ahead = H, 
+                        data = NULL, out.sample = 0, n.roll = 0)
+forc1
+```
+
+```{r}
+# plot(forc1)
+```
+
+Let's analyze the **`forc1@forecast`** section:
+
+-   **`fit1`** contains all the necessary information, including data
+    (hence **`data=NULL`**).
+
+-   **`fitorspec`** can be either a model or one that has already been
+    estimated with **`ugarchfit`**. In this case, the "simple GARCH"
+    model is being used.
+
+-   **`H=10`** specifies a forecasting horizon of 10 steps, which
+    corresponds to a period of 2 weeks (assuming financial markets are
+    closed on weekends).
+
+-   Other parameters of the function are set to null.
+
+-   **`data`** indicates any additional data required for the analysis.
+
+-   "Out-of-sample" implies that, for instance, if there are 1500 data
+    points, the last 100 data points are used for forecasting. It
+    represents the portion of the time series left for post-analysis.
+
+-   **`n.roll`** indicates the number of steps ahead to forecast.
+
+The forecasts include:
+
+-   Predictions for returns 10 steps ahead, starting from the last
+    out-of-sample observation (the series).
+
+-   Forecasted values for sigma, which represents the prediction of
+    volatility.
+
+-   If you had a pure GARCH model, returns would be equal to 0 because
+    the pure GARCH assumes a mean of 0.
+
+-   With a fixed time series length (T) and a mobile horizon (H),
+    forecasts are made using information up to the last observation in
+    the dataset (tail(data, 1)).
+
+-   For **`mu`**, it equals 0.16031128, and you want to see if the
+    forecasts are close to this value.
+
+-   The forecasts mainly pertain to sigma, which should converge in the
+    long term to the unconditional sigma of the time series.
+
+-   It's not surprising if the forecasts for mu are mostly constant, as
+    mu is typically assumed to be constant in GARCH models.
+
+```{r}
+spec1x <- getspec(fit1) #estraggo la specificazione di fit1
+#descrivo: ho var targ? NO, che modello ho sulla media: arima(1,0,0)=AR(1) e distribuzione std
+setfixed(spec1x) <- as.list(coef(fit1))
+#con setfixed si considerano come parametri VERI e non come stimati
+
+forc2 <- ugarchforecast(fitORspec = spec1x, n.ahead = H, 
+                        data = yret, out.sample = NROW(yret) - 1600, n.roll = 0)
+forc2@forecast$seriesFor
+forc2@forecast$sigmaFor
+par(mfrow=c(1,2))
+```
+
+```{r}
+# ANALISI ROLLING:
+####3) ex-post, h = 1:H at t = nrow(yret)
+forc3 <- ugarchforecast(fitORspec = spec1x, n.ahead = H,  
+                        data = yret, out.sample = NROW(yret) - 1600, n.roll = 10)
+forc3@forecast$seriesFor
+forc3@forecast$sigmaFor
 ```
