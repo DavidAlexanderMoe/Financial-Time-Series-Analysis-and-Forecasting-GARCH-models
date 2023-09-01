@@ -4,7 +4,7 @@
  
 | Purpose | File |
 | --------------- | --------------- |
-| Analysis | TSA.md |
+| Analysis | TSA-GARCH.md |
 | Report | Report Fin-TSA.pdf |
 | Custom functions | Functions folder |
 | Raw R code | TSA_raw.R |
