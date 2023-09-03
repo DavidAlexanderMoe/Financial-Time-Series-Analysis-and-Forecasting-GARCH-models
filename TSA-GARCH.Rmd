@@ -504,9 +504,8 @@ print( fit2@fit$robust.matcoef )
 ```
 
 The coefficient associated with the "leverage" effect (gamma1) is highly
-significant (see also the NIC (News Impact Curve)).
-Obtained as a special case of the Family-GARCH, the T-GARCH model is
-estimated:
+significant (see also the NIC (News Impact Curve)). Obtained as a
+special case of the Family-GARCH, the T-GARCH model is estimated:
 
 ```{r}
 ################################################################################
@@ -844,8 +843,7 @@ things are not very clear. It is noted that many ME and all MPE are
 negative therefore forecasts will probably tend to be higher than the
 true values. Having so many observations available, it is possible to
 make other checks such as the Diebold-Mariano test which compares two
-models at a time, evaluating which is the best among them.
-Volatility:
+models at a time, evaluating which is the best among them. Volatility:
 
 ```{r}
 #### Diebold-Mariano forecasting comparison -> competizione fra 2 modelli
@@ -904,8 +902,8 @@ x1 <- .MincerZarnowitz(y = y, fit = fit6@fit$sigma, msg = "IGARCH\n") #non va be
 ## Forecast using rugarch
 
 The forecast of returns and volatility for the 10 days following 31
-December 2021 in which the financial
-markets are open. In table the forecast values:
+December 2021 in which the financial markets are open. In table the
+forecast values:
 
 plot(forc1)
 
@@ -922,9 +920,9 @@ forc1 <- ugarchforecast(fitORspec = fit5, n.ahead = H,
 forc1
 ```
 
-```{r}
-# plot(forc1)
-```
+![](TSA-GARCH_files/figure-gfm/00001b.png)
+
+![](TSA-GARCH_files/figure-gfm/000012.png)
 
 Let's analyze the **`forc1@forecast`** section:
 
