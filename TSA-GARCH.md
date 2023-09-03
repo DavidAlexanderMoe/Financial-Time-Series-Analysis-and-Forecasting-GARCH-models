@@ -2208,9 +2208,9 @@ forc1
     ## T+9  0.1338 1.667
     ## T+10 0.1338 1.681
 
-``` r
-# plot(forc1)
-```
+![](TSA-GARCH_files/figure-gfm/00001b.png)
+
+![](TSA-GARCH_files/figure-gfm/000012.png)
 
 Let’s analyze the **`forc1@forecast`** section:
 
